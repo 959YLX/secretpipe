@@ -14,17 +14,48 @@
 
 package main
 
-const ()
+import (
+	"errors"
+	"net"
+
+	proc "github.com/959YLX/secretpipe/protocol"
+
+	"github.com/sirupsen/logrus"
+)
+
+const (
+	spipeProtocol = "spipe"
+)
 
 // StartServer 启动服务端
 func StartServer() {
 	LoadConfig()
 	listeners := PipeConfig.Pipe.Server.Listeners
 	for _, listener := range listeners {
-		startListener(listener.Protocol, listener.IP, listener.Port)
+		go startListener(listener.Protocol, listener.IP, listener.Port)
 	}
 }
 
-func startListener(protocol string, ip string, port int) {
-
+func startListener(protocol string, ip string, port int) error {
+	defer func() {
+		recover()
+	}()
+	tcpListener, err := net.ListenTCP("tcp", &net.TCPAddr{
+		IP:   net.ParseIP(ip),
+		Port: port,
+	})
+	if err != nil {
+		return errors.New("Listen tcp error")
+	}
+	for {
+		conn, err := tcpListener.Accept()
+		if err != nil {
+			logrus.WithError(err).Error("Accept tcp connection failed")
+			continue
+		}
+		switch protocol {
+		case spipeProtocol:
+			proc.NewSpipe(&conn, true)
+		}
+	}
 }

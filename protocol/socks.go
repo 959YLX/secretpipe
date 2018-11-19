@@ -28,7 +28,7 @@ const (
 )
 
 var (
-	authMethodNotSupportError = errors.New("Socks5 Auth method not supported")
+	errMethodNotSupport = errors.New("Socks5 Auth method not supported")
 )
 
 /*
@@ -148,10 +148,16 @@ func (socks *Socks5) Service() error {
 		for socks.lifeStatus != Closed {
 			switch socks.lifeStatus {
 			case WaitInit:
-				socks.initSocks5()
+				if err := socks.initSocks5(); err != nil {
+					socks.lifeStatus = Closed
+				}
 			case WaitAuth:
 
 			}
+		}
+		// closed
+		if socks.conn != nil {
+			(*socks.conn).Close()
 		}
 	}()
 	return nil
@@ -174,15 +180,15 @@ func (socks *Socks5) initSocks5() error {
 		switch supportMethod {
 		case 0x00:
 			// NO AUTHENTICATION REQUIRED
-			return authMethodNotSupportError
+			return errMethodNotSupport
 		case 0x02:
 			// USERNAME/PASSWORD
 			logrus.Debug("Client support username auth")
 		case 0xFF:
 			//  NO ACCEPTABLE METHODS
-			return authMethodNotSupportError
+			return errMethodNotSupport
 		default:
-			return authMethodNotSupportError
+			return errMethodNotSupport
 		}
 	}
 	// build response package
