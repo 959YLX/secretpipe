@@ -21,7 +21,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math/rand"
 	"net"
+	"sync"
+	"time"
+
+	"github.com/959YLX/secretpipe/util"
 
 	"github.com/sirupsen/logrus"
 )
@@ -37,39 +42,48 @@ import (
 // it can have only one spipe connection between proxy client and one server at one time
 type Spipe struct {
 	// remote server connection
-	remoteAddr net.Addr
-	remoteConn *net.Conn
-	localConn  map[uint32]*net.Conn
-	activity   bool
-	shutdown   bool
-	isServer   bool
-	isAuth     bool
-	encryptor  func(data []byte, key []byte) []byte
-	decryptor  func(data []byte, key []byte) []byte
-	key        []byte
+	remoteAddr    *net.Addr
+	remoteConn    *net.Conn
+	localConn     map[uint32]*net.Conn
+	activity      bool
+	isServer      bool
+	isAuth        bool
+	encryptor     func(data []byte, key []byte) []byte
+	decryptor     func(data []byte, key []byte) []byte
+	key           []byte
+	offlineTime   time.Time
+	spipeID       uint32
+	randGenerator *rand.Rand
 }
 
-var spipes []*Spipe
+var existSpipes map[uint32]*Spipe
+var spipeMapMutex = new(sync.Mutex)
 
 // NewSpipe create new spipe object
 func NewSpipe(remoteConn *net.Conn, isServer bool) error {
-	if !isServer && len(spipes) > 0 {
+	if !isServer && len(existSpipes) > 0 {
 		return errors.New("Client cannot create more than one spipe")
 	}
 	if remoteConn == nil {
 		return errors.New("Connection is nil")
 	}
+	remoteAddr := (*remoteConn).RemoteAddr()
+	generator := rand.New(rand.NewSource(time.Now().Unix()))
 	spipe := &Spipe{
-		remoteAddr: (*remoteConn).RemoteAddr(),
-		remoteConn: remoteConn,
-		isServer:   isServer,
-		localConn:  make(map[uint32]*net.Conn),
-		activity:   true,
-		shutdown:   false,
-		isAuth:     false,
+		remoteAddr:    &remoteAddr,
+		remoteConn:    remoteConn,
+		isServer:      isServer,
+		localConn:     make(map[uint32]*net.Conn),
+		activity:      true,
+		isAuth:        false,
+		randGenerator: generator,
 	}
-	spipes = append(spipes, spipe)
+	spipe.generateSpipeID()
 	spipe.service()
+	return nil
+}
+
+func (spipe *Spipe) activityRecover(recoverData []byte) error {
 	return nil
 }
 
@@ -121,6 +135,7 @@ const (
 	cmdNotFoundErrorCode uint16 = 0x0001
 	cmdNotFoundErrorMsg  string = "Request CMD not found"
 	authErrorCode        uint16 = 0x0002
+	authNotPassErrorMsg  string = "Wrong user name or password"
 )
 
 var (
@@ -157,19 +172,35 @@ func (spipe *Spipe) service() {
 	var readerBuffer []byte
 	buffer := bytes.NewBuffer(readerBuffer)
 	go func() {
-		for !spipe.shutdown && spipe.remoteConn != nil {
+		defer func() {
+			recover()
+			if spipe.remoteConn != nil {
+				(*spipe.remoteConn).Close()
+				spipe.remoteAddr = nil
+				spipe.remoteConn = nil
+			}
+			spipe.activity = false
+			spipe.offlineTime = time.Now()
+		}()
+		for spipe.activity && spipe.remoteConn != nil {
 			if _, err := io.ReadFull(*spipe.remoteConn, headerBuffer); err != nil {
-				logrus.Warnf("Read full header catch error")
-				logrus.WithError(err).Debugf("Spipe is %+v", spipe)
+				if err == io.ErrUnexpectedEOF {
+					logrus.Warnf("Read full header catch error")
+				}
+				break
 			}
 			buffer.Reset()
 			buffer.Write(headerBuffer)
 			if headerBuffer[7]&1 == 1 {
 				// cmd package
 				header := &SettingRequestHeader{}
-				binary.Read(buffer, binary.BigEndian, header)
+				err := binary.Read(buffer, binary.BigEndian, header)
+				if err != nil {
+					logrus.WithError(err).Error("Read cmd header error")
+					continue
+				}
 				data := make([]byte, header.DataSize)
-				if _, err := io.ReadFull(*spipe.remoteConn, data); err != nil {
+				if _, err = io.ReadFull(*spipe.remoteConn, data); err != nil {
 					logrus.WithError(err).Warn("Receive incomplete data")
 					continue
 				}
@@ -180,9 +211,17 @@ func (spipe *Spipe) service() {
 				}
 				switch header.CMD {
 				case authCMD:
-					_, err := authParser(data)
+					authData, err := authParser(data)
 					if err != nil {
 						retDataPtr = (&SettingErrorResponseData{ErrorCode: authErrorCode, Msg: err.Error()}).toBytes()
+						responseHeader.Success = false
+					}
+					if util.Auth(authData.UName, authData.Passwd) {
+						retData := make([]byte, 4)
+						binary.BigEndian.PutUint32(retData, spipe.spipeID)
+						retDataPtr = &retData
+					} else {
+						retDataPtr = (&SettingErrorResponseData{ErrorCode: authErrorCode, Msg: authNotPassErrorMsg}).toBytes()
 						responseHeader.Success = false
 					}
 				default:
@@ -225,4 +264,18 @@ func (spipe *Spipe) service() {
 			}
 		}
 	}()
+}
+
+func (spipe *Spipe) generateSpipeID() {
+	var id uint32
+	spipeMapMutex.Lock()
+	for {
+		id = spipe.randGenerator.Uint32()
+		if _, exist := existSpipes[id]; !exist {
+			break
+		}
+	}
+	existSpipes[id] = spipe
+	spipeMapMutex.Unlock()
+	spipe.spipeID = id
 }

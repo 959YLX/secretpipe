@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package util
 
 import (
 	"io/ioutil"
@@ -31,24 +31,41 @@ type Config struct {
 				Port       int    `yaml:port`
 				Encryption string `yaml:encryption`
 			}
+			Users []struct {
+				UserName string `yaml:username`
+				Password string `yaml:password`
+			}
 		}
 	}
 }
 
 // PipeConfig 配置信息对象
-var PipeConfig Config
+var PipeConfig *Config
+var userMap map[string]string
 
 // LoadConfig 加载配置信息
 func LoadConfig() error {
-	PipeConfig = Config{}
+	PipeConfig = &Config{}
 	buffer, err := ioutil.ReadFile("config.yaml")
 	if err != nil {
 		logrus.WithError(err).Error("Load config file error")
 		return err
 	}
-	if err = yaml.Unmarshal(buffer, &PipeConfig); err != nil {
+	if err = yaml.Unmarshal(buffer, PipeConfig); err != nil {
 		logrus.WithError(err).Error("Parse config file error")
 		return err
 	}
+	userMap = make(map[string]string)
+	for _, user := range PipeConfig.Pipe.Server.Users {
+		userMap[user.UserName] = user.Password
+	}
 	return nil
+}
+
+// Auth Check user legitimacy
+func Auth(username string, password string) bool {
+	if configPassword, exist := userMap[username]; exist && configPassword == password {
+		return true
+	}
+	return false
 }

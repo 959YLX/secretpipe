@@ -19,6 +19,7 @@ import (
 	"net"
 
 	proc "github.com/959YLX/secretpipe/protocol"
+	"github.com/959YLX/secretpipe/util"
 
 	"github.com/sirupsen/logrus"
 )
@@ -29,8 +30,10 @@ const (
 
 // StartServer 启动服务端
 func StartServer() {
-	LoadConfig()
-	listeners := PipeConfig.Pipe.Server.Listeners
+	if err := util.LoadConfig(); err != nil {
+		logrus.WithError(err).Error("Load config error")
+	}
+	listeners := util.PipeConfig.Pipe.Server.Listeners
 	for _, listener := range listeners {
 		go startListener(listener.Protocol, listener.IP, listener.Port)
 	}
