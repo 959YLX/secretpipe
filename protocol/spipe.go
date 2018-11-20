@@ -44,6 +44,9 @@ type Spipe struct {
 	shutdown   bool
 	isServer   bool
 	isAuth     bool
+	encryptor  func(data []byte, key []byte) []byte
+	decryptor  func(data []byte, key []byte) []byte
+	key        []byte
 }
 
 var spipes []*Spipe
@@ -78,11 +81,72 @@ type SettingRequestHeader struct {
 	_        uint32
 }
 
+// SettingResponseHeader Spipe setting response header
+type SettingResponseHeader struct {
+	Success  bool
+	DataSize uint16
+	CMD      byte
+	_        uint32
+}
+
+// SettingErrorResponseData setting error data
+type SettingErrorResponseData struct {
+	ErrorCode uint16
+	Msg       string
+}
+
+func (data *SettingErrorResponseData) toBytes() *[]byte {
+	msgLen := len(data.Msg)
+	bufferBytes := make([]byte, 4+msgLen)
+	buffer := bytes.NewBuffer(bufferBytes)
+	binary.Write(buffer, binary.BigEndian, data.ErrorCode)
+	binary.Write(buffer, binary.BigEndian, uint16(msgLen))
+	buffer.Write([]byte(data.Msg))
+	retBytes := buffer.Bytes()
+	return &retBytes
+}
+
 // ForwardDataHeader forward data package header
 type ForwardDataHeader struct {
 	DataSize uint16
 	TunnelID uint32
 	_        uint16
+}
+
+const (
+	authCMD byte = 0x01
+)
+
+const (
+	cmdNotFoundErrorCode uint16 = 0x0001
+	cmdNotFoundErrorMsg  string = "Request CMD not found"
+	authErrorCode        uint16 = 0x0002
+)
+
+var (
+	// ErrIncompleteData incomplete cmd data
+	ErrIncompleteData = errors.New("incomplete cmd data")
+)
+
+// AuthRequestData 认证请求数据
+type AuthRequestData struct {
+	UName  string
+	Passwd string
+}
+
+func authParser(data []byte) (*AuthRequestData, error) {
+	totalSize := len(data)
+	if totalSize < 2 {
+		return nil, ErrIncompleteData
+	}
+	unameSize := data[0]
+	pwdSize := data[1]
+	if totalSize < int(unameSize+pwdSize+2) {
+		return nil, ErrIncompleteData
+	}
+	unameBytes := data[2 : 2+unameSize]
+	pwdBytes := data[2+unameSize : 2+unameSize+pwdSize]
+	return &AuthRequestData{UName: string(unameBytes), Passwd: string(pwdBytes)}, nil
 }
 
 func (spipe *Spipe) service() {
@@ -104,6 +168,36 @@ func (spipe *Spipe) service() {
 				// cmd package
 				header := &SettingRequestHeader{}
 				binary.Read(buffer, binary.BigEndian, header)
+				data := make([]byte, header.DataSize)
+				if _, err := io.ReadFull(*spipe.remoteConn, data); err != nil {
+					logrus.WithError(err).Warn("Receive incomplete data")
+					continue
+				}
+				var retDataPtr *[]byte
+				responseHeader := SettingResponseHeader{
+					Success: true,
+					CMD:     header.CMD,
+				}
+				switch header.CMD {
+				case authCMD:
+					_, err := authParser(data)
+					if err != nil {
+						retDataPtr = (&SettingErrorResponseData{ErrorCode: authErrorCode, Msg: err.Error()}).toBytes()
+						responseHeader.Success = false
+					}
+				default:
+					retDataPtr = (&SettingErrorResponseData{ErrorCode: cmdNotFoundErrorCode, Msg: cmdNotFoundErrorMsg}).toBytes()
+					responseHeader.Success = false
+				}
+				if retDataPtr == nil {
+					responseHeader.DataSize = 0
+					binary.Write(*spipe.remoteConn, binary.BigEndian, &responseHeader)
+				} else {
+					retData := *retDataPtr
+					responseHeader.DataSize = uint16(len(retData))
+					binary.Write(*spipe.remoteConn, binary.BigEndian, &responseHeader)
+					(*spipe.remoteConn).Write(retData)
+				}
 			} else {
 				// data package
 				header := &ForwardDataHeader{}
@@ -126,7 +220,7 @@ func (spipe *Spipe) service() {
 				}
 				if remaining != 0 {
 					// data not complete
-					logrus.WithField("remaining data size", remaining).Error("Forward data not complete")
+					logrus.WithField("remaining data size", remaining).Error("Incomplete forward data")
 				}
 			}
 		}
