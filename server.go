@@ -19,7 +19,6 @@ import (
 	"net"
 
 	proc "github.com/959YLX/secretpipe/protocol"
-	"github.com/959YLX/secretpipe/util"
 
 	"github.com/sirupsen/logrus"
 )
@@ -30,10 +29,10 @@ const (
 
 // StartServer 启动服务端
 func StartServer() {
-	if err := util.LoadConfig(); err != nil {
+	if err := LoadConfig(); err != nil {
 		logrus.WithError(err).Error("Load config error")
 	}
-	listeners := util.PipeConfig.Pipe.Server.Listeners
+	listeners := config.Pipe.Server.Listeners
 	for _, listener := range listeners {
 		go startListener(listener.Protocol, listener.IP, listener.Port)
 	}
@@ -58,7 +57,14 @@ func startListener(protocol string, ip string, port int) error {
 		}
 		switch protocol {
 		case spipeProtocol:
-			proc.NewSpipe(&conn, true)
+			spipe, err := proc.NewSpipe(true)
+			if err != nil || spipe == nil {
+				logrus.WithError(err).Error("Create new spipe error")
+				continue
+			}
+			if err = spipe.Active(&conn); err != nil {
+				logrus.WithError(err).Error("Active spipe error")
+			}
 		}
 	}
 }

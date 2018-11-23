@@ -6,6 +6,7 @@ pipe:
         ip: "127.0.0.1"
         port: 50000
         encryption: ""
+        timeout: 600
     users:
       -
         username: "admin"

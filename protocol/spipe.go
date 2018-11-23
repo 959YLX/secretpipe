@@ -26,15 +26,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/959YLX/secretpipe/util"
-
+	"github.com/959YLX/secretpipe/service"
 	"github.com/sirupsen/logrus"
 )
 
 /*
  +---------------------+
- |VER| DSIZE| CMD| DATA|
- | 1 |   4  |  1 | ver |
+ |VER| DSIZE| CMD|  -  |
+ | 1 |   4  |  1 |  2  |
  +---------------------+
 */
 
@@ -42,7 +41,7 @@ import (
 // it can have only one spipe connection between proxy client and one server at one time
 type Spipe struct {
 	// remote server connection
-	remoteAddr    *net.Addr
+	remoteAddr    net.Addr
 	remoteConn    *net.Conn
 	localConn     map[uint32]*net.Conn
 	activity      bool
@@ -54,30 +53,39 @@ type Spipe struct {
 	offlineTime   time.Time
 	spipeID       uint32
 	randGenerator *rand.Rand
+	timeout       uint16
 }
 
 var existSpipes map[uint32]*Spipe
 var spipeMapMutex = new(sync.Mutex)
 
 // NewSpipe create new spipe object
-func NewSpipe(remoteConn *net.Conn, isServer bool) error {
+func NewSpipe(isServer bool) (*Spipe, error) {
 	if !isServer && len(existSpipes) > 0 {
-		return errors.New("Client cannot create more than one spipe")
+		return nil, errors.New("Client cannot create more than one spipe")
 	}
-	if remoteConn == nil {
-		return errors.New("Connection is nil")
-	}
-	remoteAddr := (*remoteConn).RemoteAddr()
-	generator := rand.New(rand.NewSource(time.Now().Unix()))
 	spipe := &Spipe{
-		remoteAddr:    &remoteAddr,
-		remoteConn:    remoteConn,
-		isServer:      isServer,
 		localConn:     make(map[uint32]*net.Conn),
-		activity:      true,
+		activity:      false,
+		isServer:      isServer,
 		isAuth:        false,
-		randGenerator: generator,
+		randGenerator: rand.New(rand.NewSource(time.Now().Unix())),
 	}
+	return spipe, nil
+}
+
+// ActiveServerSpipe active server spipe
+func (spipe *Spipe) ActiveServerSpipe(conn *net.Conn, timeout uint16) error {
+	if !spipe.isServer {
+		return errors.New("Spipe's type error")
+	}
+	if conn == nil {
+		return errors.New("Cannot user nil connection to activity spipe")
+	}
+	spipe.remoteAddr = (*conn).RemoteAddr()
+	spipe.remoteConn = conn
+	spipe.isAuth = false
+	spipe.timeout = timeout
 	spipe.generateSpipeID()
 	spipe.service()
 	return nil
@@ -171,18 +179,21 @@ func (spipe *Spipe) service() {
 	forwardDataBuffer := make([]byte, 4*1024)
 	var readerBuffer []byte
 	buffer := bytes.NewBuffer(readerBuffer)
+	spipe.activity = true
+	defer func() {
+		recover()
+		if spipe.remoteConn != nil {
+			(*spipe.remoteConn).Close()
+			spipe.remoteAddr = nil
+			spipe.remoteConn = nil
+		}
+		spipe.activity = false
+		spipe.offlineTime = time.Now()
+	}()
 	go func() {
-		defer func() {
-			recover()
-			if spipe.remoteConn != nil {
-				(*spipe.remoteConn).Close()
-				spipe.remoteAddr = nil
-				spipe.remoteConn = nil
-			}
-			spipe.activity = false
-			spipe.offlineTime = time.Now()
-		}()
 		for spipe.activity && spipe.remoteConn != nil {
+			// set recfeive timeout
+			(*spipe.remoteConn).SetReadDeadline(time.Now().Add(time.Duration(spipe.timeout) * time.Second))
 			if _, err := io.ReadFull(*spipe.remoteConn, headerBuffer); err != nil {
 				if err == io.ErrUnexpectedEOF {
 					logrus.Warnf("Read full header catch error")
@@ -216,7 +227,7 @@ func (spipe *Spipe) service() {
 						retDataPtr = (&SettingErrorResponseData{ErrorCode: authErrorCode, Msg: err.Error()}).toBytes()
 						responseHeader.Success = false
 					}
-					if util.Auth(authData.UName, authData.Passwd) {
+					if service.Auth(authData.UName, authData.Passwd) {
 						retData := make([]byte, 4)
 						binary.BigEndian.PutUint32(retData, spipe.spipeID)
 						retDataPtr = &retData

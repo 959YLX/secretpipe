@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package util
+package main
 
 import (
 	"io/ioutil"
+
+	"github.com/959YLX/secretpipe/service"
 
 	"github.com/sirupsen/logrus"
 	yaml "gopkg.in/yaml.v2"
@@ -30,6 +32,7 @@ type Config struct {
 				IP         string `yaml:ip`
 				Port       int    `yaml:port`
 				Encryption string `yaml:encryption`
+				Timeout    int    `yaml:timeout`
 			}
 			Users []struct {
 				UserName string `yaml:username`
@@ -40,32 +43,22 @@ type Config struct {
 }
 
 // PipeConfig 配置信息对象
-var PipeConfig *Config
-var userMap map[string]string
+var config *Config
 
 // LoadConfig 加载配置信息
 func LoadConfig() error {
-	PipeConfig = &Config{}
+	config = &Config{}
 	buffer, err := ioutil.ReadFile("config.yaml")
 	if err != nil {
 		logrus.WithError(err).Error("Load config file error")
 		return err
 	}
-	if err = yaml.Unmarshal(buffer, PipeConfig); err != nil {
+	if err = yaml.Unmarshal(buffer, config); err != nil {
 		logrus.WithError(err).Error("Parse config file error")
 		return err
 	}
-	userMap = make(map[string]string)
-	for _, user := range PipeConfig.Pipe.Server.Users {
-		userMap[user.UserName] = user.Password
+	for _, user := range config.Pipe.Server.Users {
+		service.PutUser(user.UserName, user.Password)
 	}
 	return nil
-}
-
-// Auth Check user legitimacy
-func Auth(username string, password string) bool {
-	if configPassword, exist := userMap[username]; exist && configPassword == password {
-		return true
-	}
-	return false
 }
